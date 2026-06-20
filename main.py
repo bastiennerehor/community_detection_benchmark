@@ -6,7 +6,8 @@ from pathlib import Path
 
 
 from modina import probit_rescaling
-from utils import compute_modularity, compute_conductance
+import numpy as np
+from utils import compute_modularity, compute_conductance, combine_data
 from graph import build_weighted_graph
 from cm_partitioning import (
     SUPPORTED_COMMUNITY_METHODS,
@@ -30,10 +31,11 @@ env = Env()
 
 env.read_env()
 
-SUPPORTED_WEIGHT_OPTIONS = ('abs-raw-E','log-raw-P', '-logp_e_abs_raw', 'abs-probit-E', 'abs-std-E', '-logp_abs_probit-E', '-logp_abs_std-E')
+SUPPORTED_WEIGHT_OPTIONS = ('abs-raw-E','log-raw-P', '1-raw-P', '-logp_e_abs_raw', 'abs-probit-E', 'abs-std-E', '-logp_abs_probit-E', '-logp_abs_std-E')
 BENCHMARK_DEFAULT_DENSITY = 0.1
-BENCHMARK_DEFAULT_EDGE_WEIGHT = '1-raw-P'
-TEST_MODE = 'nonparametric'  # 'nonparametric' or 'parametric'
+BENCHMARK_DEFAULT_EDGE_WEIGHT = '-logp_e_abs_raw'
+TEST_MODE = 'parametric'  # 'nonparametric' or 'parametric'
+BENCHMARKING_NAME = env.str("OBSERVATION_SOURCE") 
 
 def benchmark_community_detection(selected_links, used_node_ids, methods=None, resolution=1.0, edge_weight=None, seed=42):
     graph = build_weighted_graph(selected_links, used_node_ids, edge_weight)
@@ -125,18 +127,20 @@ def run_benchmark_from_whole_network(
     methods=None,
     resolution=1.0,
     seed=42,
-    output_dir='./benchmarking/runs',
+    output_dir='./output',
 ):
     # calculate association network
-    network_data = pd.read_csv(env("PHENOTYPE_PATH"), sep=",", index_col=env("PATIENT_ID_COLUMN"), low_memory=False)
+    network_data, network_meta_data = combine_data(env)
     if not os.path.exists(env("CALCULATED_EDGES_PATH")+"/"+env("OBSERVATION_SOURCE")+"_"+test_mode+"_scores.csv"):
         print(env("CALCULATED_EDGES_PATH")+env("OBSERVATION_SOURCE")+"_"+test_mode+"_scores.csv")
         logger.info("No pre-calculated edges found, computing context scores from whole network data...")
-        network_meta_data = pd.read_csv(env("PHENOTYPE_META_PATH"), sep=",", low_memory=False)
+        print(np.unique(network_meta_data['type']))
+        score_calc_start = time.perf_counter()
         assoc_scores = compute_context_scores(context_data=network_data, meta_file=network_meta_data, test_type=test_mode,
                                         correction= 'bh', num_workers=env.int("NUMBER_OF_WORKERS"),
                             path=env("CALCULATED_EDGES_PATH"), nan_value=env.int("NAN_VALUE"),
                             name=env("OBSERVATION_SOURCE")+"_"+test_mode)
+        print(f"compute_context_scores runtime: {time.perf_counter() - score_calc_start:.2f}s")
     else:
         logger.info("Pre-calculated edges found, loading from file...")
         assoc_scores = pd.read_csv(env("CALCULATED_EDGES_PATH")+"/"+env("OBSERVATION_SOURCE")+"_"+test_mode+"_scores.csv", sep=",", low_memory=False)
@@ -156,8 +160,6 @@ def run_benchmark_from_whole_network(
     #TODO which to include in weights and how
     filtered_assoc_scores = std_rescaling(scores1=filtered_assoc_scores, scores2=None, metric='std-E')
     filtered_assoc_scores = probit_rescaling(scores1=filtered_assoc_scores, scores2=None, metric='probit-E')
-
-    print(filtered_assoc_scores.head())
 
     # For logging
     selected_nodes = set(filtered_assoc_scores["label1"]).union(set(filtered_assoc_scores["label2"]))
@@ -184,15 +186,21 @@ def run_benchmark_from_whole_network(
     # Only result plotting from here-on
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    run_output_dir = Path(output_dir)
-    run_output_dir.mkdir(parents=True, exist_ok=True)
+    safe_edge_weight = edge_weight.replace('/', '_')
+    run_dir = Path(output_dir) / BENCHMARKING_NAME / test_mode / safe_edge_weight / timestamp
+    runs_dir = run_dir / 'runs'
+    plots_dir = run_dir / 'plots'
+    partitions_dir = run_dir / 'partitions'
+    runs_dir.mkdir(parents=True, exist_ok=True)
+
     file_name = f'benchmarking_cm_detection_{timestamp}.csv'
-    output_path = run_output_dir / file_name
+    output_path = runs_dir / file_name
     comparison_file_name = f'benchmarking_cm_detection_pairwise_{timestamp}.csv'
-    comparison_output_path = run_output_dir / comparison_file_name
+    comparison_output_path = runs_dir / comparison_file_name
 
     # Shared metadata is written once above the table to keep method rows compact.
     metadata_rows = [
+        ('benchmarking_name', BENCHMARKING_NAME),
         ('test_mode', test_mode),
         ('selected_node_count', selected_node_count),
         ('selected_edge_count', selected_edge_count),
@@ -231,7 +239,6 @@ def run_benchmark_from_whole_network(
         benchmark_assignments=benchmark_assignments,
         seed=seed,
     )
-    partitions_dir = Path(output_dir).resolve().parent / 'cm_partitions' / timestamp
     partitions_dir.mkdir(parents=True, exist_ok=True)
     partitions_output_paths = {}
     for method, payload in cm_partitions_payloads.items():
@@ -252,13 +259,10 @@ def run_benchmark_from_whole_network(
     try:
         from benchmarking.benchmark_plotting import generate_plots
 
-        benchmark_root_dir = Path(output_dir).resolve().parent
-        plots_output_dir = benchmark_root_dir / 'plots' / timestamp
-
         heatmap_path, metrics_path, runtime_path = generate_plots(
             benchmark_csv=Path(output_path),
             pairwise_csv=Path(comparison_output_path),
-            output_dir=plots_output_dir,
+            output_dir=plots_dir,
         )
         print(f"Pairwise heatmap written to: {heatmap_path}")
         print(f"Modularity/conductance plot written to: {metrics_path}")
@@ -268,6 +272,7 @@ def run_benchmark_from_whole_network(
 
     print(f"Benchmark results written to: {output_path}")
     print(f"Pairwise comparison results written to: {comparison_output_path}")
+    print(f"Run directory: {run_dir}")
     print(f"CM partitions written to: {partitions_dir}")
     for method, partitions_output_path in partitions_output_paths.items():
         print(f"  {method}: {partitions_output_path}")
@@ -283,5 +288,5 @@ if __name__ == '__main__':
         test_mode=TEST_MODE,
         resolution=1.0,
         seed=42,
-        output_dir='./benchmarking/runs',
+        output_dir='./benchmarking',
     )

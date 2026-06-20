@@ -18,7 +18,7 @@ def _collect_family_partitions(benchmark_df, benchmark_assignments, family):
     family_rows = benchmark_df[benchmark_df['method'].map(_community_family_name) == family]
     family_rows = family_rows.dropna(subset=['hierarchy_level']).sort_values('hierarchy_level')
     return {
-        str(int(row['hierarchy_level'])): benchmark_assignments[row['method']]
+        resolution_to_key(row['hierarchy_level']): benchmark_assignments[row['method']]
         for _, row in family_rows.iterrows()
     }
 
@@ -87,8 +87,8 @@ def build_cm_partitions_for_methods(graph, filtered_assoc_scores, candidate_link
 
     - 'leiden' sweeps DEFAULT_LEIDEN_RESOLUTIONS, keyed by resolution (e.g. 'community_r0.2').
     - Flat methods ('louvain', 'infomap') get a single partition keyed 'community_r1.0'.
-    - Hierarchical families get one partition per level, keyed by level number
-      (e.g. 'community_r1', 'community_r2', ...).
+    - Hierarchical families get one partition per level, keyed by decimal level
+      (e.g. 'community_r1.0', 'community_r2.0', ...).
     """
     links = _build_cm_partition_links(filtered_assoc_scores)
     payloads = {}
